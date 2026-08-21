@@ -1,0 +1,24 @@
+{
+  "name": "simple-calculator",
+  "version": "1.0.0",
+  "description": "Simple Calculator - a lightweight Android APK built from scratch with Node.js and the Android SDK command-line tools (no Gradle).",
+  "private": true,
+  "main": "build.js",
+  "scripts": {
+    "test": "node tests/run-tests.js",
+    "build": "node build.js",
+    "clean": "node tools/clean.js",
+    "verify": "node tools/verify.js",
+    "icons": "node tools/genicons.js"
+  },
+  "keywords": [
+    "android",
+    "apk",
+    "calculator",
+    "nodejs"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=14"
+  }
+}

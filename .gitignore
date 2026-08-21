@@ -1,0 +1,27 @@
+# Build outputs
+build/
+dist/
+
+# Generated R.java / classes
+gen/
+classes/
+
+# Java
+*.class
+
+# Keystores (generated at build time)
+*.keystore
+*.jks
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+npm-debug.log*
