@@ -12,6 +12,14 @@ classes/
 # Keystores (generated at build time)
 *.keystore
 *.jks
+*.idsig
+
+# Secrets / credentials - never commit these
+.env
+.env.*
+auth.json
+*token*
+*credentials*
 
 # OS junk
 .DS_Store
