@@ -360,8 +360,10 @@ section('Required project files');
 
 check('AGENTS.md contains the mandatory factory workflow', () => {
   const a = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8').toLowerCase();
-  ['app design', 'app icon', 'github actions', '/storage/emulated/0/download/',
-    'api 26', 'never commit'].forEach(s =>
+  ['one simple idea', 'opencode provides the complete app', 'automatic product analysis',
+    'automatic ux/ui design', 'automatic feature plan',
+    'github actions', '/storage/emulated/0/download/',
+    'api 26', 'never commit', 'professional'].forEach(s =>
     assert(a.includes(s), `AGENTS.md missing rule: ${s}`));
 });
 

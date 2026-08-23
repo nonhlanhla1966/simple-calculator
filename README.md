@@ -33,15 +33,20 @@ node build.js   ->  aapt -> javac -> d8 -> zipalign -> apksigner -> dist/Simple-
 
 ## Creating a new app
 
+Give **one simple idea** - e.g. "build a hymn app" or "build a money app".
+Per `AGENTS.md`, OpenCode then autonomously designs the product (name, icon,
+screens, features, storage, colors), scaffolds and implements it:
+
 ```
 node tools/scaffold.js "My Next App" ../my-next-app
 ```
 
 Generates a complete standalone project: valid unique package name
 (`com.nonhlanhla1966.<slug>`), manifest at API 26+, generic WebView host
-activity, letter-based launcher icons in all densities, tests, CI workflow,
-and the same build scripts. Customize the icon (`tools/genicons.js`) and the
-UI (`www/`). Calculator code is never copied into new apps.
+activity, launcher icons in all densities, behavior-test baseline, CI
+workflow, and the same build scripts. The idea is the only required input;
+OpenCode makes all design decisions itself and delivers a polished,
+real-world-ready APK. App code is never copied between apps.
 
 ## GitHub Actions
 

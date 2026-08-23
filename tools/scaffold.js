@@ -351,8 +351,11 @@ console.log(ok?'APK VERIFIED OK':'VERIFY FAILED');process.exit(ok?0:1);
 
 function runTestsTemplate(appName, pkg) {
 return `#!/usr/bin/env node
-/* Generic validation suite for ${appName}. Extend with app-specific tests.
- * Zero dependencies. Run with: npm test */
+/* Validation suite for ${appName}. Zero dependencies. Run with: npm test
+ * This baseline checks build integrity. Per AGENTS.md you MUST extend it
+ * with tests for real application behavior (features, storage, edge cases)
+ * before declaring the app complete - file-existence tests alone are not
+ * acceptable for a finished app. */
 'use strict';
 const fs=require('fs'),path=require('path'),{execFileSync}=require('child_process');
 const ROOT=path.join(__dirname,'..');
