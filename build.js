@@ -20,8 +20,25 @@ const { execFileSync } = require('child_process');
 const ROOT = __dirname;
 const BUILD = path.join(ROOT, 'build');
 const DIST = path.join(ROOT, 'dist');
-const APP_NAME = 'Simple Calculator';
-const APK_NAME = 'Simple-Calculator.apk';
+
+/* App identity is read from the manifest/strings - no duplicate config. */
+function readManifest() {
+  return fs.readFileSync(path.join(ROOT, 'AndroidManifest.xml'), 'utf8');
+}
+function manifestAttr(manifest, attr) {
+  const m = manifest.match(new RegExp(`android:${attr}="([^"]+)"`));
+  return m ? m[1] : null;
+}
+function appSlug() {
+  const strings = fs.readFileSync(path.join(ROOT, 'res', 'values', 'strings.xml'), 'utf8');
+  const label = (strings.match(/<string name="app_name">([^<]+)<\/string>/) || [])[1] || 'App';
+  return label.trim().replace(/[^\w\s-]/g, '').replace(/[\s_]+/g, '-');
+}
+
+const MANIFEST = readManifest();
+const APP_NAME = manifestAttr(MANIFEST, 'versionName') ? appSlug() : 'App';
+const VERSION_NAME = manifestAttr(MANIFEST, 'versionName') || '1.0.0';
+const APK_NAME = `${APP_NAME}-v${VERSION_NAME}.apk`;
 
 /* ------------------------------------------------------------------ */
 /* Toolchain discovery                                                 */
@@ -122,7 +139,10 @@ function run(cmd, args, opts) {
 /* ------------------------------------------------------------------ */
 
 function ensureKeystore(javaHome, keystore) {
+  // Stable keystore location (keys/ is gitignored): once generated it is
+  // reused so release signatures stay consistent across builds.
   if (fs.existsSync(keystore)) return;
+  fs.mkdirSync(path.dirname(keystore), { recursive: true });
   const keytool = path.join(javaHome, 'bin', 'keytool');
   run(keytool, [
     '-genkeypair', '-v',
@@ -162,7 +182,8 @@ function main() {
   const sdkZipalign = resolveNativeTool([path.join(buildTools, 'zipalign')], ['-h', '1']);
   const ZIPALIGN_MODE = sdkZipalign ? 'sdk' : 'node';
 
-  console.log(`== ${APP_NAME} build ==`);
+  console.log(`== ${APP_NAME} v${VERSION_NAME} build ==`);
+  console.log(`APK         : ${APK_NAME}`);
   console.log(`JAVA_HOME   : ${javaHome}`);
   console.log(`SDK         : ${sdk}`);
   console.log(`build-tools : ${path.basename(buildTools)}`);
@@ -251,9 +272,9 @@ function main() {
     run(process.execPath, [path.join(ROOT, 'tools', 'zipalign.js'), unsigned, aligned], { env });
   }
 
-  // 7. Sign
+  // 7. Sign (stable release keystore kept outside build/ so it survives clean)
   console.log('[7/7] Signing APK (apksigner)');
-  const keystore = path.join(BUILD, 'debug.keystore');
+  const keystore = path.join(ROOT, 'keys', 'release.keystore');
   ensureKeystore(javaHome, keystore);
   const apkOut = path.join(DIST, APK_NAME);
   run(APKSIGNER, [

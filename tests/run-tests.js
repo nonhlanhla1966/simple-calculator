@@ -16,8 +16,15 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const APK = path.join(ROOT, 'dist', 'Simple-Calculator.apk');
-const DOWNLOAD_APK = '/storage/emulated/0/Download/Simple-Calculator.apk';
+
+function findDistApk() {
+  const dist = path.join(ROOT, 'dist');
+  if (!fs.existsSync(dist)) return null;
+  const apks = fs.readdirSync(dist).filter(f => f.endsWith('.apk')).sort();
+  return apks.length ? path.join(dist, apks[apks.length - 1]) : null;
+}
+let APK = findDistApk();
+const DOWNLOAD_APK = '/storage/emulated/0/Download/Simple-Calculator-v1.0.0.apk';
 
 /* ---------------- tiny harness ---------------- */
 
@@ -329,6 +336,7 @@ section('Required project files');
 [
   'package.json',
   'build.js',
+  'AGENTS.md',
   'AndroidManifest.xml',
   'res/values/strings.xml',
   'res/values/styles.xml',
@@ -342,10 +350,31 @@ section('Required project files');
   'tools/zipalign.js',
   'tools/clean.js',
   'tools/verify.js',
+  'tools/version.js',
+  'tools/release.js',
+  'tools/scaffold.js',
   'tests/run-tests.js',
   '.gitignore',
   '.github/workflows/build.yml'
 ].forEach(f => check(`exists: ${f}`, () => mustExist(f)));
+
+check('AGENTS.md contains the mandatory factory workflow', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8').toLowerCase();
+  ['app design', 'app icon', 'github actions', '/storage/emulated/0/download/',
+    'api 26', 'never commit'].forEach(s =>
+    assert(a.includes(s), `AGENTS.md missing rule: ${s}`));
+});
+
+check('versioning: manifest starts at 1.0.0 (code 1)', () => {
+  const out = execFileSync(process.execPath, [path.join(ROOT, 'tools', 'version.js')], { encoding: 'utf8' });
+  assert(out.includes('versionName=1.0.0') && out.includes('versionCode=1'), `unexpected: ${out.trim()}`);
+});
+
+check('scaffold: derives valid package names and rejects bad ones', () => {
+  const scaffold = fs.readFileSync(path.join(ROOT, 'tools', 'scaffold.js'), 'utf8');
+  assert(scaffold.includes('com.${prefix}') || scaffold.includes('com.'), 'no package prefix logic');
+  assert(/slugify/.test(scaffold), 'no slugify sanitisation');
+});
 
 check('package.json defines all npm commands', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -425,7 +454,8 @@ check('npm run build completes successfully', () => {
   execFileSync(process.execPath, [path.join(ROOT, 'build.js')], {
     cwd: ROOT, encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'inherit']
   });
-  assert(fs.existsSync(APK), 'dist/Simple-Calculator.apk was not produced');
+  APK = findDistApk();
+  assert(APK, 'no .apk produced in dist/');
 });
 
 check('APK is a plausible size (> 10 KB)', () => {
@@ -468,6 +498,15 @@ check('badging: no permissions requested', () => {
 check('badging: minSdk 26 / targetSdk 29', () => {
   assert(badging.includes("sdkVersion:'26'"), 'wrong minSdk');
   assert(badging.includes("targetSdkVersion:'29'"), 'wrong targetSdk');
+});
+check('badging: versionName 1.0.0 / versionCode 1', () => {
+  assert(badging.includes("versionName='1.0.0'"), 'wrong versionName in badging');
+});
+check('badging: versioned APK filename matches <AppName>-v<version>.apk', () => {
+  assert(path.basename(APK) === 'Simple-Calculator-v1.0.0.apk', `unexpected name: ${path.basename(APK)}`);
+});
+check('badging: release build (not debuggable)', () => {
+  assert(!badging.includes('application-debuggable'), 'APK is marked debuggable');
 });
 
 ['classes.dex', 'assets/index.html', 'assets/css/styles.css', 'assets/js/calculator.js',

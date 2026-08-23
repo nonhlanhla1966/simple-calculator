@@ -9,7 +9,8 @@ classes/
 # Java
 *.class
 
-# Keystores (generated at build time)
+# Keystores / signing secrets (generated at build time, never committed)
+keys/
 *.keystore
 *.jks
 *.idsig

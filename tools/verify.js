@@ -11,7 +11,14 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const APK = path.join(ROOT, 'dist', 'Simple-Calculator.apk');
+const DIST = path.join(ROOT, 'dist');
+
+function findApk() {
+  if (!fs.existsSync(DIST)) return null;
+  const apks = fs.readdirSync(DIST).filter(f => f.endsWith('.apk')).sort();
+  return apks.length ? path.join(DIST, apks[apks.length - 1]) : null;
+}
+const APK = findApk();
 
 let failures = 0;
 function check(name, fn) {
@@ -74,9 +81,9 @@ function findApksigner() {
   throw new Error('apksigner not found');
 }
 
-console.log('Verifying dist/Simple-Calculator.apk\n');
+console.log('Verifying APK from dist/\n');
 
-check('APK exists', () => assert(fs.existsSync(APK), 'dist/Simple-Calculator.apk not found - run npm run build'));
+check('APK exists', () => assert(APK, 'no .apk file found in dist/ - run npm run build'));
 
 check('APK is a valid ZIP (magic bytes + EOCD)', () => {
   const b = fs.readFileSync(APK);
