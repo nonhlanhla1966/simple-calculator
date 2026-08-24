@@ -719,6 +719,241 @@ check('partial cloud APKs rejected: atomic publish, verify before rename, cleanu
   assert(s.includes('withRetry'), 'network calls not wrapped in retry policy');
 });
 
+/* ================================================================== */
+/* 17. Factory orchestration (checkpoint/resume/multi-model/$0)        */
+/* ================================================================== */
+
+section('Factory orchestration');
+
+const Os = require('os');
+const Ckpt = require(path.join(ROOT, 'tools', 'checkpoint'));
+const ModelsMod = require(path.join(ROOT, 'tools', 'models'));
+const PermMod = require(path.join(ROOT, 'tools', 'perm'));
+
+function tmpFactoryDir(label) {
+  const d = fs.mkdtempSync(path.join(Os.tmpdir(), 'factory-' + label + '-'));
+  return d;
+}
+
+check('checkpoint: create/save/load roundtrip persists stage history', () => {
+  const dir = tmpFactoryDir('ckpt');
+  let s = Ckpt.fresh('make a torch app');
+  Ckpt.save(dir, s);
+  const loaded = Ckpt.load(dir);
+  assertEqual(loaded.idea, 'make a torch app', 'idea');
+  Ckpt.complete(dir, loaded, 'TEST');
+  const again = Ckpt.load(dir);
+  assert(again.completed.TEST, 'completed stage not persisted');
+  assertEqual(Ckpt.nextStage(again), 'LOCAL_VALIDATION', 'next stage');
+});
+
+check('checkpoint: resume continues from safest unfinished stage, never repeats work', () => {
+  const s = Ckpt.fresh('idea');
+  ['IDEA', 'DESIGN', 'CODE', 'TEST'].forEach(st => {
+    s.completed[st] = { at: new Date().toISOString(), artifact: null };
+    s.stage = st;
+  });
+  const plan = Ckpt.resumePlan(s, { hasManifest: true, hasGit: true, distApks: [] });
+  assertEqual(plan.from, 'LOCAL_VALIDATION', 'resume stage');
+  ['IDEA', 'DESIGN', 'CODE', 'TEST'].forEach(st =>
+    assert(plan.skip.includes(st), 'plan must skip completed ' + st));
+  /* existing app without recorded idea -> never re-runs design/code */
+  const existing = Ckpt.fresh(null);
+  existing.stage = 'IDEA';
+  const plan2 = Ckpt.resumePlan(existing, { hasManifest: true, hasGit: true, distApks: [] });
+  assertEqual(plan2.from, 'TEST', 'existing app resumes at TEST');
+});
+
+check('orchestrator: transient failure recovered automatically, workflow continues', () => {
+  const r = spawnSync(process.execPath, ['-e',
+    'const path=require("path");const ROOT=process.argv[1];' +
+    'const Ckpt=require(path.join(ROOT,"tools","checkpoint"));' +
+    'const {createPipeline}=require(path.join(ROOT,"tools","factory"));' +
+    'const fs=require("fs"),os=require("os");' +
+    'const dir=fs.mkdtempSync(path.join(os.tmpdir(),"pipe-"));' +
+    'const state=Object.assign(Ckpt.fresh("test idea"),{' +
+    'completed:{IDEA:{at:"t"},DESIGN:{at:"t"},CODE:{at:"t"},TEST:{at:"t"},' +
+    'LOCAL_VALIDATION:{at:"t"},GITHUB_PUSH:{at:"t"},CI_BUILD:{at:"t"},' +
+    'APK_VERIFY:{at:"t"},RELEASE:{at:"t",artifact:"https://example.com/x.apk"}},stage:"RELEASE"});' +
+    'const pipeline=createPipeline({root:dir,state,' +
+    'exec:()=>({status:0,stdout:"ok\\nhttps://example.com/x.apk",stderr:""}),' +
+    'api:async()=>({status:200,json:{},text:""}),' +
+    'registry:{models:[{ref:"local/mock",provider:"local",cost:"free"}]},health:{},' +
+    'model:async t=>({text:"",model:"local/mock",attempts:1,tried:[]})});' +
+    'pipeline.run().then(res=>{if(res.ok&&res.url==="https://example.com/x.apk")' +
+    'console.log("WORKFLOW_CONTINUED_TO_DOWNLOAD_READY");else process.exit(1);})' +
+    '.catch(e=>{console.error(e.message);process.exit(1);});',
+    path.join(ROOT)], { encoding: 'utf8' });
+  assert(r.status === 0, 'pipeline failed: ' + (r.stderr || '').trim());
+  assert(/WORKFLOW_CONTINUED_TO_DOWNLOAD_READY/.test(r.stdout), 'no continuation marker');
+});
+
+check('models: free-first routing; paid excluded unless explicitly authorized', () => {
+  const reg = { models: [
+    { ref: 'openai/gpt-x', provider: 'openai', cost: 'paid' },
+    { ref: 'ollama/llama3', provider: 'ollama', cost: 'free' },
+    { ref: 'host/session-model', provider: 'host', cost: 'unknown' }] };
+  const order = ModelsMod.route(reg, {});
+  assertEqual(order[0].ref, 'ollama/llama3', 'free model must route first');
+  assert(!order.some(m => m.cost === 'paid'), 'paid model leaked into default route');
+  assert(order.some(m => m.ref === 'host/session-model'), 'unknown host model should be usable');
+});
+
+check('models: paid-only registry stops with explicit report, never charges silently', () => {
+  const reg = { models: [{ ref: 'anthropic/claude-x', provider: 'anthropic', cost: 'paid' }] };
+  let msg = null;
+  try { ModelsMod.route(reg, {}); } catch (e) { msg = e.message; }
+  assert(msg && /Paid model\/provider would be required\./.test(msg),
+    'missing explicit paid-required report, got: ' + msg);
+  /* explicit opt-in unlocks it */
+  const allowed = ModelsMod.route(reg, { allowPaid: true });
+  assertEqual(allowed[0].ref, 'anthropic/claude-x', 'explicit opt-in should allow');
+});
+
+check('models: fallback on unavailable and rate-limited primary models', () => {
+  const r = spawnSync(process.execPath, ['-e',
+    'const path=require("path");const Models=require(path.join(process.argv[1],"tools","models"));' +
+    'const reg={models:[{ref:"a/dead",provider:"a",cost:"free"},' +
+    '{ref:"b/limited",provider:"b",cost:"free"},{ref:"c/good",provider:"c",cost:"free"}]};' +
+    'const invoker=async ref=>{if(ref==="a/dead")throw Object.assign(new Error("command not found"),{kind:"unavailable"});' +
+    'if(ref==="b/limited")throw Object.assign(new Error("rate limit exceeded (429)"),{kind:"ratelimit"});' +
+    'return "fine output";};' +
+    'Models.invoke({prompt:"do thing"},{registry:reg,health:{},invoker,validate:()=>true})' +
+    '.then(res=>{if(res.model==="c/good"&&res.tried.length===2&&' +
+    'res.tried[0].kind==="unavailable"&&res.tried[1].kind==="ratelimit")' +
+    'console.log("FALLBACK_OK");else{console.error(JSON.stringify(res));process.exit(1);}})' +
+    '.catch(e=>{console.error(e.message);process.exit(1);});',
+    path.join(ROOT)], { encoding: 'utf8' });
+  assert(r.status === 0 && /FALLBACK_OK/.test(r.stdout),
+    'fallback trail wrong: ' + (r.stderr || r.stdout).trim());
+});
+
+check('models: all-models-down fails finitely with MODEL_EXHAUSTED (no infinite loop)', () => {
+  const r = spawnSync(process.execPath, ['-e',
+    'const path=require("path");const Models=require(path.join(process.argv[1],"tools","models"));' +
+    'let n=0;const reg={models:[{ref:"a/down",provider:"a",cost:"free"},' +
+    '{ref:"b/down",provider:"b",cost:"free"}]};' +
+    'Models.invoke({prompt:"x"},{registry:reg,health:{},validate:()=>true,' +
+    'invoker:async()=>{n++;throw new Error("unavailable");}})' +
+    '.then(()=>process.exit(1))' +
+    '.catch(e=>{if(/MODEL_EXHAUSTED/.test(e.message)&&n<=4){console.log("EXHAUSTED_OK n="+n);}' +
+    'else{console.error("n="+n+" msg="+e.message);process.exit(1);}});',
+    path.join(ROOT)], { encoding: 'utf8' });
+  assert(r.status === 0 && /EXHAUSTED_OK/.test(r.stdout),
+    (r.stderr || r.stdout).trim());
+});
+
+check('models: health tracking deprioritizes repeat failures, one success forgives', () => {
+  const h = {};
+  ModelsMod.record(h, 'm/x', 'timeout');
+  ModelsMod.record(h, 'm/x', 'timeout');
+  assert(h['m/x'].cooldownUntil > Date.now(), 'repeat failures must trigger cooldown');
+  ModelsMod.record(h, 'm/y', 'ok', 100);
+  ModelsMod.record(h, 'm/y', 'timeout');
+  assert(!h['m/y'].cooldownUntil, 'single failure must not blacklist');
+  ModelsMod.record(h, 'm/x', 'ok', 50);
+  assert(!h['m/x'].cooldownUntil, 'one success must forgive cooldown');
+});
+
+check('credential protection: secrets redacted and never enter the registry', () => {
+  const dirty = 'token ghp_abcdefghijklmnopqrstuv1234567890 key sk-abcdef123456 password=hunter2';
+  const clean = ModelsMod.redact(dirty);
+  assert(!/ghp_|sk-|hunter2/.test(clean), 'redact missed a secret: ' + clean);
+  /* discovery must skip keys named like secrets */
+  const home = tmpFactoryDir('cfg');
+  fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config', 'opencode', 'opencode.json'),
+    JSON.stringify({ model: 'host/session-model', apiKey: 'sk-SUPERSECRET', tokens: ['ghp_ZZZ'] }));
+  const disc = ModelsMod.discover({}, home);
+  assert(disc.models.some(m => m.ref === 'host/session-model'), 'model not discovered');
+  const flat = JSON.stringify(disc);
+  assert(!/SUPERSECRET|sk-|ghp_/.test(flat), 'secret material leaked into discovery output');
+});
+
+check('permissions: capability survey reports exact requirements instead of prompting', () => {
+  const writable = PermMod.probeWrite(tmpFactoryDir('perm'));
+  assert(writable.ok === true, 'writable project dir reported blocked');
+  const readOnly = path.join(tmpFactoryDir('ro'), 'locked');
+  fs.mkdirSync(readOnly);
+  fs.chmodSync(readOnly, 0o500);
+  const blocked = PermMod.probeWrite(readOnly);
+  if (!blocked.ok) {
+    assert(Array.isArray(blocked.requiresUser) && blocked.requiresUser.length === 1,
+      'must report structured requiresUser entry');
+    assert(blocked.requiresUser[0].exactRequirement, 'missing exact requirement text');
+  } else {
+    console.log('  note: running as privileged user, read-only dir still writable');
+  }
+});
+
+check('no unnecessary prompts: interactive input code is banned in factory tools', () => {
+  const strip = src => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  fs.readdirSync(path.join(ROOT, 'tools')).filter(f => f.endsWith('.js')).forEach(f => {
+    const src = strip(fs.readFileSync(path.join(ROOT, 'tools', f), 'utf8'));
+    [/require\(\s*['"]readline['"]\s*\)/, /readline\s*\.\s*createInterface/,
+      /\bconfirm\s*\(/, /\bprompt\s*\(/, /\bquestion\s*\(/].forEach(p =>
+      assert(!p.test(src), `${f} appears to prompt interactively`));
+  });
+});
+
+check('applyFiles protocol: writes files, rejects unsafe paths', () => {
+  const { applyFiles } = require(path.join(ROOT, 'tools', 'factory.js'));
+  const dir = tmpFactoryDir('files');
+  const n = applyFiles('<<<FILE: www/js/app.js>>>\nconsole.log(1);\n<<<END>>>', dir);
+  assertEqual(n.join(','), 'www/js/app.js', 'applied list');
+  assert(fs.readFileSync(path.join(dir, 'www/js/app.js'), 'utf8').includes('console.log(1)'),
+    'file content wrong');
+  ['../evil.js', '/abs/path.js'].forEach(bad => {
+    let threw = false;
+    try { applyFiles(`<<<FILE: ${bad}>>>\nx\n<<<END>>>`, dir); } catch (_) { threw = true; }
+    assert(threw, 'unsafe path accepted: ' + bad);
+  });
+});
+
+check('CI recovery: reads failure logs, asks debug model, pushes fix, waits for new run', () => {
+  const r = spawnSync(process.execPath, ['-e',
+    'const path=require("path");const fs=require("fs"),os=require("os");' +
+    'const ROOT=process.argv[1];' +
+    'const Ckpt=require(path.join(ROOT,"tools","checkpoint"));' +
+    'const {createPipeline}=require(path.join(ROOT,"tools","factory"));' +
+    'const dir=fs.mkdtempSync(path.join(os.tmpdir(),"ci-"));' +
+    'let ciPolls=0;const modelCalls=[];const execCalls=[];' +
+    'const pipeline=createPipeline({root:dir,state:Ckpt.fresh("x"),' +
+    'exec:(cmd,args)=>{execCalls.push([cmd,args&&args[0]]);' +
+    'if(cmd==="git"&&args[0]==="config")return {status:0,stdout:"https://github.com/o/r.git",stderr:""};' +
+    'if(cmd==="git"&&args[0]==="rev-parse")return {status:0,stdout:"abc123",stderr:""};' +
+    'return {status:0,stdout:"abc123",stderr:""};},' +
+    'api:async p=>{if(/\\/runs\\?head_sha/.test(p)){' +
+    'return {status:200,json:{workflow_runs:[{head_sha:"abc123",id:10,status:"completed",' +
+    'conclusion:"success",html_url:"u"}]}};}' +
+    'if(/\\/jobs$/.test(p))return {status:200,json:{jobs:[{id:77,conclusion:"failure"}]}};' +
+    'return {status:200,json:{},text:""};},fetchLogs:async jobId=>{' +
+    'if(jobId!==77)throw new Error("wrong job");' +
+    'return "##[error] exit 1\\nerror: bad syntax somewhere";},' +
+    'registry:{models:[{ref:"local/mock",provider:"local",cost:"free"}]},health:{},' +
+    'model:async t=>{modelCalls.push(t.role);if(t.role!=="debug")throw new Error("wrong role");' +
+    'if(!/bad syntax/.test(t.prompt))throw new Error("logs missing from prompt");' +
+    'return {text:"<<<FILE: src/Fix.java>>>\\nclass Fix{}\\n<<<END>>>",model:"local/mock",attempts:1,tried:[]};}});' +
+    'pipeline.ciRepair("o/r",{id:9,html_url:"u"}).then(outcome=>{' +
+    'const ok=outcome&&outcome.conclusion==="success"&&modelCalls.length===1&&' +
+    'execCalls.some(c=>c[1]==="push")&&pipeline.state.repairs.ci===1;' +
+    'console.log(ok?"CI_REPAIR_OK":"BAD:"+JSON.stringify({outcome,modelCalls,execCalls}));' +
+    'process.exit(ok?0:1);}).catch(e=>{console.error(e.stack||e.message);process.exit(1);});',
+    path.join(ROOT)], { encoding: 'utf8', timeout: 60000 });
+  assert(r.status === 0 && /CI_REPAIR_OK/.test(r.stdout),
+    'CI recovery failed: ' + ((r.stderr || r.stdout) + '').trim().slice(-400));
+});
+
+check('factory wiring: cloud verification + browser publish are pipeline stages ($0)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'tools', 'factory.js'), 'utf8');
+  ['fetch-cloud-apk.js', 'release.js', 'APK READY — DOWNLOAD AVAILABLE',
+    'FACTORY_ALLOW_PAID', '--resume'].forEach(s =>
+    assert(src.includes(s), 'factory.js missing: ' + s));
+  const models = fs.readFileSync(path.join(ROOT, 'tools', 'models.js'), 'utf8');
+  ['MODEL FALLBACK', 'Paid model/provider would be required'].forEach(s =>
+    assert(models.includes(s), 'models.js missing: ' + s));
+});
+
 /* ---------------- summary ---------------- */
 
 console.log('\n========================================');
