@@ -151,7 +151,7 @@ function ensureKeystore(javaHome, keystore) {
     '-alias', 'simplecalc',
     '-keyalg', 'RSA', '-keysize', '2048',
     '-validity', '10000',
-    '-dname', 'CN=Simple Calculator,O=SimpleCalc,C=US'
+    '-dname', `CN=${APP_NAME},O=AppFactory,C=US`
   ]);
 }
 

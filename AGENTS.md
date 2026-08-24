@@ -59,7 +59,7 @@ APP IDEA -> AUTOMATIC PRODUCT ANALYSIS -> AUTOMATIC UX/UI DESIGN
 -> AUTOMATIC FEATURE PLAN -> AUTOMATIC ICON DESIGN -> IMPLEMENTATION
 -> TESTING -> BUILD -> AUTOMATIC ERROR REPAIR -> GIT COMMIT -> GITHUB PUSH
 -> GITHUB ACTIONS -> CLOUD APK -> APK VERIFICATION
--> COPY APK TO /storage/emulated/0/Download/
+-> APK DELIVERY (tools/deliver.js, verified destination) -> DOWNLOAD
 ```
 
 ## Build system rules
@@ -119,8 +119,54 @@ suppress errors.
 - Signing uses a locally generated keystore cached in `keys/` (stable across
   builds, never committed). This is self-signed - suitable for sideloading,
   not Play-Store production signing. Report this limitation honestly.
-- Copy the verified APK to `/storage/emulated/0/Download/` (replace same-name
-  files safely; verify existence and non-zero size afterwards).
+
+### APK DELIVERY SUCCESS != BUILD SUCCESS
+
+A printed path is NOT a delivery. For every app, run the full chain:
+
+```
+BUILD -> FIND ACTUAL APK -> VERIFY SOURCE -> COPY -> VERIFY DESTINATION -> REPORT
+```
+
+Always use `node tools/deliver.js` (`npm run deliver`). It locates the built
+APK, verifies badging + signature at the source, detects a genuinely writable
+public Download directory starting at `/storage/emulated/0/Download/`
+(fallbacks: `OPENCODE_DOWNLOAD_DIR`, `/sdcard/Download/`, `$HOME/Download/`),
+copies the file with mode **0644** (mode 600 root-owned files are invisible
+to Android apps - never ship them), then
+verifies the DESTINATION copy: exists, readable, size > 0, sha256 identical
+to source, package/versionName/versionCode readable from the destination
+file, signature valid. It also best-effort requests a MediaStore rescan.
+
+Never claim "APK DELIVERY SUCCESS" unless `tools/deliver.js` printed its
+success line after verifying the destination file. If any step fails, the
+workflow fails and shows the actual reason.
+
+The generated test suite includes a Delivery section that runs this
+verification; on hosts without public storage (e.g. GitHub runners) it skips
+cleanly instead of failing.
+
+## Automatic routine access
+
+Perform all routine development operations immediately and automatically,
+using the permissions this environment already has: creating/editing project
+files and directories, running builds/tests/cleans, reading build logs,
+git init/add/commit/push, GitHub API calls (repo creation, Actions/artifact
+queries, releases), and copying the APK into Download.
+
+Do NOT stop to ask "may I...?" for these. Never ask the same permission twice.
+
+If an operation fails due to an access problem:
+1. Inspect the exact error.
+2. Look for a legitimate alternative already available in the environment
+   (AndroidIDE's existing grants, app-specific/app-private storage, SAF
+   access already granted, existing env vars, alternate writable paths).
+3. Use the least-privileged legitimate alternative automatically and retry.
+4. Only surface the issue if genuine interactive Android authorization is
+   unavoidable - and then state exactly what is blocked and why, once.
+
+NEVER bypass real Android security: no attempts to defeat sandboxes,
+permission dialogs, authentication, or user-consent mechanisms.
 
 ## Git and GitHub
 

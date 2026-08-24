@@ -13,7 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -566,18 +566,41 @@ check('signing certificate identity matches project', () => {
 });
 
 /* ================================================================== */
-/* 15. Delivery copy                                                   */
+/* 15. Delivery (BUILD SUCCESS != DELIVERY SUCCESS)                    */
 /* ================================================================== */
 
 section('Delivery');
 
-if (fs.existsSync(path.dirname(DOWNLOAD_APK))) {
-  check(`copy delivered to ${DOWNLOAD_APK}`, () => {
-    assert(fs.existsSync(DOWNLOAD_APK), 'Download copy missing');
-    assertEqual(fs.statSync(DOWNLOAD_APK).size, fs.statSync(APK).size, 'download copy size differs from dist APK');
-  });
+check('deliver.js present with success gate', () => {
+  const p = path.join(ROOT, 'tools', 'deliver.js');
+  assert(fs.existsSync(p), 'missing tools/deliver.js');
+  const src = fs.readFileSync(p, 'utf8');
+  assert(src.includes('APK DELIVERY SUCCESS'), 'delivery tool lacks success gate');
+  assert(src.includes('sha256'), 'delivery tool does not verify content');
+});
+
+const dlCheck = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'deliver.js'), '--check'],
+  { encoding: 'utf8' });
+if (dlCheck.status === 3) {
+  console.log('  skip delivery verification: no writable Download dir on this host');
 } else {
-  console.log(`  skip ${DOWNLOAD_APK} (directory not present on this machine)`);
+  check(`delivered APK physically verified in public Download`, () => {
+    const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'deliver.js')],
+      { encoding: 'utf8' });
+    if (r.status !== 0)
+      throw new Error('delivery failed: ' + ((r.stderr || r.stdout || '') + ' exit ' + r.status).trim());
+    const line = (r.stdout.split('\n').find(l => l.startsWith('APK DELIVERY SUCCESS')) || '').trim();
+    assert(line, 'no success marker in delivery output');
+    const dst = line.replace('APK DELIVERY SUCCESS ', '').trim();
+    const st = fs.statSync(dst);
+    assert(st.size > 0, 'delivered file is empty');
+    assertEqual(st.size, fs.statSync(APK).size, 'delivered size != dist size');
+    assert((st.mode & 0o004) !== 0, 'delivered file not world-readable (invisible to apps)');
+    const out = execFileSync(findAapt(), ['dump', 'badging', dst], { encoding: 'utf8' });
+    assert(out.includes("package: name='com.simple.calculator'"),
+      'wrong package at destination');
+    assert(/versionName='[\d.]+'/.test(out), 'no versionName readable at destination');
+  });
 }
 
 /* ---------------- summary ---------------- */

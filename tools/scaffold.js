@@ -356,10 +356,10 @@ return `#!/usr/bin/env node
  * with tests for real application behavior (features, storage, edge cases)
  * before declaring the app complete - file-existence tests alone are not
  * acceptable for a finished app. */
-'use strict';
-const fs=require('fs'),path=require('path'),{execFileSync}=require('child_process');
-const ROOT=path.join(__dirname,'..');
-let passed=0,failed=0;const failures=[];
+ 'use strict';
+ const fs=require('fs'),path=require('path'),{execFileSync,spawnSync}=require('child_process');
+ const ROOT=path.join(__dirname,'..');
+ let passed=0,failed=0;const failures=[];
 const section=n=>console.log('\\n== '+n+' ==');
 function check(name,fn){try{fn();passed++;console.log('  ok  '+name);}
   catch(err){failed++;failures.push(name+': '+err.message);console.log('FAIL  '+name+'\\n      '+err.message);}}
@@ -396,10 +396,15 @@ check('npm run build succeeds',()=>{execFileSync(process.execPath,[path.join(ROO
 let badging='';
 check('APK badging/signature',()=>{
   const apk=path.join(APK,fs.readdirSync(APK).find(f=>f.endsWith('.apk')));
-  const env={...process.env};env.JAVA_HOME='/opt/java/jdk1.8.0_212';
-  env.PATH=path.join(env.JAVA_HOME,'bin')+path.delimiter+env.PATH;
+  const jh=process.env.JAVA_HOME&&fs.existsSync(path.join(process.env.JAVA_HOME,'bin','javac'))
+    ?process.env.JAVA_HOME:'/opt/java/jdk1.8.0_212';
+  if(!fs.existsSync(path.join(jh,'bin','javac'))&&!process.env.JAVA_HOME)
+    throw new Error('no JDK found');
+  const env={...process.env};env.JAVA_HOME=jh;
+  env.PATH=path.join(jh,'bin')+path.delimiter+env.PATH;
   const aapt=['/usr/bin/aapt'];
-  const bt=path.join('/opt/android_sdk','build-tools');
+  const sdk=process.env.ANDROID_SDK_ROOT||process.env.ANDROID_HOME||'/opt/android_sdk';
+  const bt=path.join(sdk,'build-tools');
   try{for(const v of fs.readdirSync(bt).sort().reverse())aapt.push(path.join(bt,v,'aapt'));}catch(_){}
   let a=null;for(const c of aapt){try{execFileSync(c,['v'],{stdio:'ignore'});a=c;break;}catch(_){}}
   badging=execFileSync(a,['dump','badging',apk],{encoding:'utf8'});
@@ -410,6 +415,37 @@ check('APK badging/signature',()=>{
     const c=path.join(bt,v,'apksigner');if(fs.existsSync(c))return c;}throw new Error('no apksigner');})();
   const out=execFileSync(signer,['verify','--verbose',apk],{encoding:'utf8',env});
   assert(/Verified using v\\d scheme/i.test(out),'signature failed');});
+
+section('Delivery (BUILD SUCCESS != DELIVERY SUCCESS)');
+function deliverAapt(){
+  const sdk=process.env.ANDROID_SDK_ROOT||process.env.ANDROID_HOME||'/opt/android_sdk';
+  const cs=['/usr/bin/aapt'];const bt=path.join(sdk,'build-tools');
+  try{for(const v of fs.readdirSync(bt).sort().reverse())cs.push(path.join(bt,v,'aapt'));}catch(_){}
+  for(const c of cs){try{execFileSync(c,['v'],{stdio:'ignore'});return c;}catch(_){}}
+  throw new Error('no aapt for delivery verification');}
+check('deliver.js present and executable logic',()=>{
+  const p=path.join(ROOT,'tools','deliver.js');
+  assert(fs.existsSync(p),'missing tools/deliver.js');
+  const src=fs.readFileSync(p,'utf8');
+  assert(src.includes('APK DELIVERY SUCCESS'),'delivery tool lacks success gate');
+  assert(src.includes('sha256'),'delivery tool does not verify content');});
+const dl=spawnSync(process.execPath,[path.join(ROOT,'tools','deliver.js'),'--check'],{encoding:'utf8'});
+if(dl.status===3){
+  console.log('  skip delivery verification: no writable Download dir on this host');
+}else{
+  check('delivered APK physically verified in public Download',()=>{
+    const r=spawnSync(process.execPath,[path.join(ROOT,'tools','deliver.js')],{encoding:'utf8'});
+    if(r.status!==0)
+      throw new Error('delivery failed: '+(r.stderr||r.stdout||'exit '+r.status).trim());
+    const line=(r.stdout.split('\\n').find(l=>l.startsWith('APK DELIVERY SUCCESS'))||'').trim();
+    assert(line,'no success marker in delivery output');
+    const dst=line.replace('APK DELIVERY SUCCESS ','').trim();
+    const st=fs.statSync(dst);
+    assert(st.size>0,'delivered file is empty');
+    assert((st.mode&0o004)!==0,'delivered file not world-readable (invisible to apps)');
+    const out=execFileSync(deliverAapt(),['dump','badging',dst],{encoding:'utf8'});
+    assert(out.includes("package: name='${pkg}'"),'wrong pkg at destination');});
+}
 
 console.log('\\n========================================');
 console.log('PASSED: '+passed+'  FAILED: '+failed);
@@ -429,6 +465,7 @@ return `{
     "build": "node build.js",
     "clean": "node tools/clean.js",
     "verify": "node tools/verify.js",
+    "deliver": "node tools/deliver.js",
     "version": "node tools/version.js show",
     "icons": "node tools/genicons.js"
   },
@@ -484,7 +521,11 @@ function main() {
   fs.writeFileSync(path.join(T, 'tools', 'version.js'), mustRead('tools/version.js'));
   fs.writeFileSync(path.join(T, 'tools', 'release.js'), mustRead('tools/release.js'));
   fs.writeFileSync(path.join(T, 'tools', 'verify.js'), verifyTemplate());
-  fs.writeFileSync(path.join(T, '.github', 'workflows', 'build.yml'), mustRead('.github/workflows/build.yml'));
+  fs.writeFileSync(path.join(T, 'tools', 'deliver.js'), mustRead('tools/deliver.js'));
+  fs.writeFileSync(path.join(T, '.github', 'workflows', 'build.yml'),
+    mustRead('.github/workflows/build.yml')
+      .replace('name: Build Simple Calculator APK', `name: Build ${appName} APK`)
+      .replace('name: Simple-Calculator-apk', `name: ${slug}-apk`));
 
   // .gitignore with secret protection + factory rules
   fs.writeFileSync(path.join(T, '.gitignore'), mustRead('.gitignore'));
