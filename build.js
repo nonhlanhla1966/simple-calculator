@@ -35,6 +35,11 @@ function appSlug() {
   return label.trim().replace(/[^\w\s-]/g, '').replace(/[\s_]+/g, '-');
 }
 
+function appLabel() {
+  const strings = fs.readFileSync(path.join(ROOT, 'res', 'values', 'strings.xml'), 'utf8');
+  return ((strings.match(/<string name="app_name">([^<]+)<\/string>/) || [])[1] || 'App').trim();
+}
+
 const MANIFEST = readManifest();
 const APP_NAME = manifestAttr(MANIFEST, 'versionName') ? appSlug() : 'App';
 const VERSION_NAME = manifestAttr(MANIFEST, 'versionName') || '1.0.0';
@@ -151,7 +156,7 @@ function ensureKeystore(javaHome, keystore) {
     '-alias', 'simplecalc',
     '-keyalg', 'RSA', '-keysize', '2048',
     '-validity', '10000',
-    '-dname', `CN=${APP_NAME},O=AppFactory,C=US`
+    '-dname', `CN=${appLabel()},O=AppFactory,C=US`
   ]);
 }
 
