@@ -57,8 +57,9 @@ when proceeding could produce a fundamentally wrong application.
 ```
 APP IDEA -> AUTOMATIC PRODUCT ANALYSIS -> AUTOMATIC UX/UI DESIGN
 -> AUTOMATIC FEATURE PLAN -> AUTOMATIC ICON DESIGN -> IMPLEMENTATION
--> TESTING -> BUILD -> AUTOMATIC ERROR REPAIR -> GIT COMMIT -> GITHUB PUSH
--> GITHUB ACTIONS -> CLOUD APK -> APK VERIFICATION
+-> LIGHTWEIGHT LOCAL VALIDATION (tests; local build only when useful)
+-> GIT COMMIT -> GITHUB PUSH -> GITHUB ACTIONS FINAL BUILD (default builder)
+-> CLOUD APK VERIFICATION + DOWNLOAD
 -> APK DELIVERY (tools/deliver.js, verified destination) -> DOWNLOAD
 ```
 
@@ -74,6 +75,46 @@ APP IDEA -> AUTOMATIC PRODUCT ANALYSIS -> AUTOMATIC UX/UI DESIGN
   tooling architecture-portable (see `tools/zipalign.js` fallback pattern).
 - Keep apps permission-free unless genuinely required by features.
 - Prefer offline-first operation and low memory/storage usage.
+
+## Thermal-safe cloud-first build policy
+
+GitHub Actions is the DEFAULT builder for every FINAL APK. Local Android
+builds stress the phone (CPU/heat), so they are the exception, not the rule.
+
+```
+IDEA -> DESIGN -> CODE -> LOCAL LIGHTWEIGHT VALIDATION
+-> GIT PUSH -> GITHUB ACTIONS FINAL BUILD -> VERIFY ARTIFACT
+-> DELIVER VERIFIED CLOUD APK -> DOWNLOAD
+```
+
+- The final delivered APK must be the verified GitHub Actions artifact
+  whenever one is available: `npm run cloud` waits for the Actions run of
+  the current commit, downloads the artifact, verifies badging, package,
+  version and signature into `dist/`, then `tools/deliver.js` performs the
+  full destination verification. Never substitute an unverified local APK
+  when a verified cloud APK exists.
+- Local builds are allowed only for: fast development feedback, diagnosing a
+  build problem, validating a small change, or checking the project before a
+  push. Do not repeatedly rebuild the whole app locally when Actions can do
+  the final build. No Replit. No paid services.
+- Single-build rule: `build.js` holds a factory-wide lock
+  (`appfactory-android-build.lock`) - it refuses to start while another
+  factory Android build is alive and waits/reuses instead. Never launch
+  competing Gradle/Android build processes.
+- Wall-clock protection: a local build aborts cleanly after
+  `OPENCODE_LOCAL_BUILD_TIMEOUT` seconds (default 900) with instructions to
+  push and let Actions finish the job. Do not immediately start an identical
+  rebuild; prefer pushing the current state.
+- NEVER bypass, disable or work around Android thermal management. If builds
+  get abnormally slow/hot/failing, stop local building entirely and rely on
+  GitHub Actions until conditions change.
+- Resource hygiene: no unnecessary background processes, dependency
+  downloads or build caches; clean only when useful. Correctness always wins
+  over CPU savings - do not skip verification steps to stay cool.
+- Failure fallback: if Actions fails, inspect CI logs, fix the source within
+  the max-3 automatic repair attempts, push again. Use a local full build
+  only when genuinely needed to diagnose. No infinite local/cloud retry
+  cycles.
 
 ## App identity rules
 

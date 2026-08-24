@@ -579,6 +579,30 @@ check('deliver.js present with success gate', () => {
   assert(src.includes('sha256'), 'delivery tool does not verify content');
 });
 
+section('Cloud-first policy (thermal-safe)');
+
+check('build.js enforces single-build lock + wall-clock protection', () => {
+  const b = fs.readFileSync(path.join(ROOT, 'build.js'), 'utf8');
+  assert(b.includes('appfactory-android-build.lock'), 'no factory build lock');
+  assert(b.includes('OPENCODE_LOCAL_BUILD_TIMEOUT'), 'no local build deadline guard');
+  assert(b.includes('GitHub Actions'), 'cloud-first banner missing');
+});
+
+check('fetch-cloud-apk.js waits for Actions artifact of current HEAD', () => {
+  const p = path.join(ROOT, 'tools', 'fetch-cloud-apk.js');
+  assert(fs.existsSync(p), 'missing tools/fetch-cloud-apk.js');
+  const s = fs.readFileSync(p, 'utf8');
+  assert(s.includes('/actions/runs'), 'does not query Actions runs');
+  assert(s.includes('.apk') && s.includes('inflateRawSync'), 'cannot extract APK from artifact');
+  assert(s.includes('versionName'), 'does not verify version');
+});
+
+check('AGENTS.md documents the thermal-safe cloud-first policy', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8');
+  assert(/thermal-safe cloud-first/i.test(a), 'policy section missing');
+  assert(/never\s+bypass/i.test(a), 'thermal-bypass prohibition missing');
+});
+
 const dlCheck = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'deliver.js'), '--check'],
   { encoding: 'utf8' });
 if (dlCheck.status === 3) {

@@ -15,6 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { execFileSync } = require('child_process');
 
 const ROOT = __dirname;
@@ -44,6 +45,66 @@ const MANIFEST = readManifest();
 const APP_NAME = manifestAttr(MANIFEST, 'versionName') ? appSlug() : 'App';
 const VERSION_NAME = manifestAttr(MANIFEST, 'versionName') || '1.0.0';
 const APK_NAME = `${APP_NAME}-v${VERSION_NAME}.apk`;
+
+/* ------------------------------------------------------------------ */
+/* Thermal-safe cloud-first policy                                     */
+/* ------------------------------------------------------------------ */
+/* GitHub Actions is the default builder for FINAL APKs. A local build  */
+/* is for fast feedback/diagnosis only: never two at once, and it must  */
+/* abort cleanly on an excessive wall clock instead of heating the      */
+/* phone. Android thermal management is never bypassed.                 */
+
+const LOCK_PATH = path.join(os.tmpdir(), 'appfactory-android-build.lock');
+const LOCAL_BUILD_TIMEOUT_MS =
+  parseInt(process.env.OPENCODE_LOCAL_BUILD_TIMEOUT || '900', 10) * 1000;
+const BUILD_T0 = Date.now();
+
+function readLock() {
+  try { return JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')); } catch (_) { return {}; }
+}
+
+function lockHolderAlive(info) {
+  if (!info || !info.pid || info.pid === process.pid) return false;
+  try { process.kill(info.pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
+}
+
+function acquireBuildLock(waitMs) {
+  const deadline = Date.now() + waitMs;
+  let announced = false;
+  for (;;) {
+    let fd;
+    try {
+      fd = fs.openSync(LOCK_PATH, 'wx');
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, t: Date.now(), app: APP_NAME }));
+      fs.closeSync(fd);
+      return;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const info = readLock();
+      const stale = !info.t || (Date.now() - info.t) > 45 * 60 * 1000;
+      if (!lockHolderAlive(info) || stale) {
+        // Holder is dead or ancient - safe to take over.
+        try { fs.unlinkSync(LOCK_PATH); } catch (_) {}
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new Error('another factory Android build is already running (pid ' +
+          info.pid + ', started ' + Math.round((Date.now() - info.t) / 1000) +
+          's ago). Never run two heavy builds simultaneously - wait for it or reuse its result.');
+      }
+      if (!announced) {
+        console.log('[lock] another factory build is active (pid ' + info.pid + '); waiting - single-build rule.');
+        announced = true;
+      }
+      try { execFileSync('sleep', ['5']); } catch (_) {}
+    }
+  }
+}
+
+function releaseBuildLock() {
+  const info = readLock();
+  if (info && info.pid === process.pid) { try { fs.unlinkSync(LOCK_PATH); } catch (_) {} }
+}
 
 /* ------------------------------------------------------------------ */
 /* Toolchain discovery                                                 */
@@ -135,6 +196,12 @@ function pickPlatform(sdk) {
 /* ------------------------------------------------------------------ */
 
 function run(cmd, args, opts) {
+  const elapsed = Date.now() - BUILD_T0;
+  if (elapsed > LOCAL_BUILD_TIMEOUT_MS) {
+    throw new Error('LOCAL BUILD ABORTED after ' + Math.round(elapsed / 1000) +
+      's (limit ' + Math.round(LOCAL_BUILD_TIMEOUT_MS / 1000) + 's). Thermal/resource protection: ' +
+      'do not immediately retry the identical build - push this state and let GitHub Actions perform the final build.');
+  }
   console.log('  $ ' + cmd + ' ' + args.map(a => /[\s"]/.test(a) ? JSON.stringify(a) : a).join(' '));
   execFileSync(cmd, args, Object.assign({ stdio: ['ignore', 'pipe', 'inherit'], encoding: 'utf8' }, opts));
 }
@@ -161,6 +228,7 @@ function ensureKeystore(javaHome, keystore) {
 }
 
 function main() {
+  console.log('[cloud-first] GitHub Actions builds the FINAL APK; this local build is for fast feedback/diagnosis only.');
   const javaHome = findJavaHome();
   if (!javaHome) throw new Error('JDK not found. Set JAVA_HOME.');
   const sdk = findSdk();
@@ -319,7 +387,10 @@ function collectFiles(dir, ext, out) {
 }
 
 try {
-  main();
+  const lockWaitMs = parseInt(process.env.OPENCODE_LOCK_WAIT || '600', 10) * 1000;
+  acquireBuildLock(lockWaitMs);
+  try { main(); }
+  finally { releaseBuildLock(); }
 } catch (err) {
   console.error('\nBUILD FAILED:', err.message || err);
   process.exit(1);

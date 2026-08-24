@@ -9,6 +9,8 @@
     "build": "node build.js",
     "clean": "node tools/clean.js",
     "verify": "node tools/verify.js",
+    "deliver": "node tools/deliver.js",
+    "cloud": "node tools/fetch-cloud-apk.js && node tools/deliver.js",
     "icons": "node tools/genicons.js"
   },
   "keywords": [

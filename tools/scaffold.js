@@ -429,6 +429,23 @@ check('deliver.js present and executable logic',()=>{
   const src=fs.readFileSync(p,'utf8');
   assert(src.includes('APK DELIVERY SUCCESS'),'delivery tool lacks success gate');
   assert(src.includes('sha256'),'delivery tool does not verify content');});
+section('Cloud-first policy (thermal-safe)');
+check('build.js enforces single-build lock + wall-clock protection',()=>{
+  const b=fs.readFileSync(path.join(ROOT,'build.js'),'utf8');
+  assert(b.includes('appfactory-android-build.lock'),'no factory build lock');
+  assert(b.includes('OPENCODE_LOCAL_BUILD_TIMEOUT'),'no local build deadline guard');
+  assert(b.includes('GitHub Actions'),'cloud-first banner missing');});
+check('fetch-cloud-apk.js waits for Actions artifact of current HEAD',()=>{
+  const p=path.join(ROOT,'tools','fetch-cloud-apk.js');
+  assert(fs.existsSync(p),'missing tools/fetch-cloud-apk.js');
+  const s=fs.readFileSync(p,'utf8');
+  assert(s.includes('/actions/runs'),'does not query Actions runs');
+  assert(s.includes('.apk')&&s.includes('inflateRawSync'),'cannot extract APK from artifact');
+  assert(s.includes('versionName'),'does not verify version');});
+check('AGENTS.md documents the thermal-safe cloud-first policy',()=>{
+  const a=fs.readFileSync(path.join(ROOT,'AGENTS.md'),'utf8');
+  assert(/thermal-safe cloud-first/i.test(a),'policy section missing');
+  assert(/never\\s+bypass/i.test(a),'thermal-bypass prohibition missing');});
 const dl=spawnSync(process.execPath,[path.join(ROOT,'tools','deliver.js'),'--check'],{encoding:'utf8'});
 if(dl.status===3){
   console.log('  skip delivery verification: no writable Download dir on this host');
@@ -466,6 +483,7 @@ return `{
     "clean": "node tools/clean.js",
     "verify": "node tools/verify.js",
     "deliver": "node tools/deliver.js",
+    "cloud": "node tools/fetch-cloud-apk.js && node tools/deliver.js",
     "version": "node tools/version.js show",
     "icons": "node tools/genicons.js"
   },
@@ -522,6 +540,7 @@ function main() {
   fs.writeFileSync(path.join(T, 'tools', 'release.js'), mustRead('tools/release.js'));
   fs.writeFileSync(path.join(T, 'tools', 'verify.js'), verifyTemplate());
   fs.writeFileSync(path.join(T, 'tools', 'deliver.js'), mustRead('tools/deliver.js'));
+  fs.writeFileSync(path.join(T, 'tools', 'fetch-cloud-apk.js'), mustRead('tools/fetch-cloud-apk.js'));
   fs.writeFileSync(path.join(T, '.github', 'workflows', 'build.yml'),
     mustRead('.github/workflows/build.yml')
       .replace('name: Build Simple Calculator APK', `name: Build ${appName} APK`)
