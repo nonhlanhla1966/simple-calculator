@@ -352,6 +352,7 @@ section('Required project files');
   'tools/verify.js',
   'tools/version.js',
   'tools/release.js',
+  'tools/net.js',
   'tools/scaffold.js',
   'tests/run-tests.js',
   '.gitignore',
@@ -362,7 +363,7 @@ check('AGENTS.md contains the mandatory factory workflow', () => {
   const a = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8').toLowerCase();
   ['one simple idea', 'opencode provides the complete app', 'automatic product analysis',
     'automatic ux/ui design', 'automatic feature plan',
-    'github actions', '/storage/emulated/0/download/',
+    'github actions', 'download available',
     'api 26', 'never commit', 'professional'].forEach(s =>
     assert(a.includes(s), `AGENTS.md missing rule: ${s}`));
 });
@@ -566,17 +567,27 @@ check('signing certificate identity matches project', () => {
 });
 
 /* ================================================================== */
-/* 15. Delivery (BUILD SUCCESS != DELIVERY SUCCESS)                    */
+/* 15. Publish (browser-based download; no phone-storage copy)         */
 /* ================================================================== */
 
-section('Delivery');
+section('Publish (browser-based download)');
 
-check('deliver.js present with success gate', () => {
-  const p = path.join(ROOT, 'tools', 'deliver.js');
-  assert(fs.existsSync(p), 'missing tools/deliver.js');
-  const src = fs.readFileSync(p, 'utf8');
-  assert(src.includes('APK DELIVERY SUCCESS'), 'delivery tool lacks success gate');
-  assert(src.includes('sha256'), 'delivery tool does not verify content');
+check('release.js publishes verified APK as release asset', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'tools', 'release.js'), 'utf8');
+  assert(src.includes('APK READY — DOWNLOAD AVAILABLE'), 'release.js lacks final status line');
+  assert(src.includes('uploads.github.com'), 'does not upload release assets');
+});
+
+check('no automatic phone-storage delivery remains', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const scripts = Object.values(pkg.scripts || {}).join(' ');
+  assert(!scripts.includes('deliver.js'), 'package.json still invokes deliver.js');
+  assert(!fs.existsSync(path.join(ROOT, 'tools', 'deliver.js')), 'deliver.js still present');
+  assert(pkg.scripts && pkg.scripts.publish, 'missing scripts.publish');
+  assert(pkg.scripts && pkg.scripts.ship, 'missing scripts.ship');
+  const a = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8');
+  assert(/never\s+copies\s+apks/i.test(a), 'AGENTS.md does not prohibit automatic copies');
+  assert(a.includes('APK READY — DOWNLOAD AVAILABLE'), 'AGENTS.md missing final status');
 });
 
 section('Cloud-first policy (thermal-safe)');
@@ -603,29 +614,110 @@ check('AGENTS.md documents the thermal-safe cloud-first policy', () => {
   assert(/never\s+bypass/i.test(a), 'thermal-bypass prohibition missing');
 });
 
-const dlCheck = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'deliver.js'), '--check'],
-  { encoding: 'utf8' });
-if (dlCheck.status === 3) {
-  console.log('  skip delivery verification: no writable Download dir on this host');
-} else {
-  check(`delivered APK physically verified in public Download`, () => {
-    const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'deliver.js')],
-      { encoding: 'utf8' });
-    if (r.status !== 0)
-      throw new Error('delivery failed: ' + ((r.stderr || r.stdout || '') + ' exit ' + r.status).trim());
-    const line = (r.stdout.split('\n').find(l => l.startsWith('APK DELIVERY SUCCESS')) || '').trim();
-    assert(line, 'no success marker in delivery output');
-    const dst = line.replace('APK DELIVERY SUCCESS ', '').trim();
-    const st = fs.statSync(dst);
-    assert(st.size > 0, 'delivered file is empty');
-    assertEqual(st.size, fs.statSync(APK).size, 'delivered size != dist size');
-    assert((st.mode & 0o004) !== 0, 'delivered file not world-readable (invisible to apps)');
-    const out = execFileSync(findAapt(), ['dump', 'badging', dst], { encoding: 'utf8' });
-    assert(out.includes("package: name='com.simple.calculator'"),
-      'wrong package at destination');
-    assert(/versionName='[\d.]+'/.test(out), 'no versionName readable at destination');
-  });
+/* ================================================================== */
+/* 16. Network retry policy (TLS never disabled)                       */
+/* ================================================================== */
+
+section('Network retry policy (TLS never disabled)');
+
+function runNodeScript(code) {
+  return spawnSync(process.execPath, ['-e', code, path.join(ROOT, 'tools', 'net.js')],
+    { encoding: 'utf8' });
 }
+
+check('net.js exists and exports the shared retry API', () => {
+  const Net = require(path.join(ROOT, 'tools', 'net.js'));
+  assert(typeof Net.withRetry === 'function', 'withRetry missing');
+  assert(Net.MAX_ATTEMPTS === 3, 'MAX_ATTEMPTS must be 3');
+  assert(typeof Net.classify === 'function', 'classify missing');
+});
+
+check('transient certificate failure retries; later attempt succeeds and workflow continues', () => {
+  const r = runNodeScript(
+    'const Net=require(process.argv[1]);let n=0;' +
+    'Net.withRetry(()=>{n++;if(n<3){const e=new Error("certificate verification error: unable to verify the first certificate");throw e;}return "ok";},{delayMs:1,label:"t"})' +
+    '.then(v=>{if(v==="ok"&&n===3)console.log("RECOVERED AUTOMATICALLY - attempt 3 succeeded");else process.exit(1);})' +
+    '.catch(e=>{console.error(e.message);process.exit(1);});');
+  assert(r.status === 0, 'retry did not recover: ' + (r.stderr || '').trim());
+  assert(/RECOVERED AUTOMATICALLY/.test(r.stdout), 'no recovery marker in output');
+});
+
+check('maximum 3 attempts enforced with exact error report', () => {
+  const r = runNodeScript(
+    'const Net=require(process.argv[1]);let n=0;' +
+    'Net.withRetry(()=>{n++;throw new Error("socket hang up");},{delayMs:1,label:"t"})' +
+    '.then(()=>process.exit(1)).catch(e=>{if(n===3&&/FAILED AFTER 3 ATTEMPTS/.test(e.message))process.exit(0);process.exit(1);});');
+  assert(r.status === 0, 'expected exactly 3 attempts then FAILED AFTER 3 ATTEMPTS: ' + (r.stderr || '').trim());
+});
+
+check('permanent errors fail immediately (never retried)', () => {
+  const r = runNodeScript(
+    'const Net=require(process.argv[1]);let n=0;' +
+    'Net.withRetry(()=>{n++;const e=new Error("Bad credentials");e.status=401;throw e;},{delayMs:1,label:"t"})' +
+    '.then(()=>process.exit(1)).catch(e=>{if(n===1&&/PERMANENT FAILURE/.test(e.message))process.exit(0);process.exit(1);});');
+  assert(r.status === 0, '401 must fail once without retry: ' + (r.stderr || '').trim());
+});
+
+check('classifier: cert/transient vs credentials/not-found permanent', () => {
+  const Net = require(path.join(ROOT, 'tools', 'net.js'));
+  assertEqual(Net.classify({ message: 'certificate verification error' }), 'transient', 'cert error');
+  assertEqual(Net.classify({ code: 'ECONNRESET' }), 'transient', 'ECONNRESET');
+  assertEqual(Net.classify({ message: 'rate limit exceeded', status: 429 }), 'transient', '429');
+  assertEqual(Net.classify({ message: 'Bad credentials', status: 401 }), 'permanent', '401');
+  assertEqual(Net.classify({ message: 'Not Found', status: 404 }), 'permanent', '404');
+});
+
+/* Strip JS comments exactly like the no-eval security check, so security
+ * prose can never false-positive the scanners below. String literals are
+ * intentionally NOT stripped - occurrences there stay flagged (safe side). */
+function stripJsComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+}
+
+function assertNoTlsBypass(fileLabel, rawSrc) {
+  const s = stripJsComments(rawSrc);
+  [/rejectUnauthorized\s*:\s*false/, /NODE_TLS_REJECT_UNAUTHORIZED/, /GIT_SSL_NO_VERIFY/,
+    /--insecure/, /curl\s+-k/, /sslVerify\s*[:=]\s*false/].forEach(p =>
+    assert(!p.test(s), fileLabel + ' disables TLS verification: ' + p));
+}
+
+check('TLS verification is never disabled anywhere in factory scripts', () => {
+  ['tools/net.js', 'tools/fetch-cloud-apk.js', 'tools/release.js', 'build.js'].forEach(f => {
+    assertNoTlsBypass(f, fs.readFileSync(path.join(ROOT, f), 'utf8'));
+  });
+});
+
+check('TLS scanner: executable bypass is caught; comment-only mention passes', () => {
+  let caught = null;
+  try {
+    assertNoTlsBypass('synthetic-evil.js',
+      'https.request({ hostname: "x", path: "/", rejectUnauthorized: false });');
+  } catch (e) { caught = e; }
+  assert(caught && /disables TLS verification/.test(caught.message),
+    'executable rejectUnauthorized:false was NOT caught by scanner');
+  assertNoTlsBypass('synthetic-doc.js',
+    '/** docs: never set rejectUnauthorized:false anywhere */\n' +
+    '// see also: rejectUnauthorized: false is forbidden\n' +
+    'https.get("https://api.github.com");\n');
+  let caughtInString = null;
+  try {
+    assertNoTlsBypass('synthetic-string.js',
+      'const flag = "rejectUnauthorized: false";');
+  } catch (_) { caughtInString = true; }
+  assert(caughtInString, 'string-literal occurrence must stay flagged (conservative)');
+});
+
+check('partial cloud APKs rejected: atomic publish, verify before rename, cleanup on failure', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-cloud-apk.js'), 'utf8');
+  assert(s.includes('.part'), 'no partial-file staging');
+  assert(s.includes('renameSync'), 'publish not atomic');
+  assert(s.indexOf("'dump', 'badging'") < s.indexOf('renameSync'), 'verification must precede publish');
+  assert(s.includes('unlinkSync(partPath)'), 'failed fetch leaves partial APK behind');
+  assert(s.includes('Buffer.concat'), 'download must buffer fully before use');
+  assert(s.includes('withRetry'), 'network calls not wrapped in retry policy');
+});
 
 /* ---------------- summary ---------------- */
 
